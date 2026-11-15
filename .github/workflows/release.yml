@@ -1,0 +1,40 @@
+name: Release
+
+# Publie une release à chaque tag "vX.Y.Z" poussé (ex : git tag v27.0.0 && git push --tags)
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Publish
+        shell: pwsh
+        run: |
+          $v = "${{ github.ref_name }}".TrimStart('v')
+          dotnet publish -c Release -r win-x64 --self-contained false -p:Version=$v -o out
+
+      - name: Zip de mise à jour (l'app est un seul exe ; ffmpeg est téléchargé au premier lancement)
+        shell: pwsh
+        run: |
+          Remove-Item out\ffmpeg.exe -ErrorAction SilentlyContinue
+          Remove-Item out\*.pdb -ErrorAction SilentlyContinue
+          Compress-Archive -Path out\* -DestinationPath TynoRec-update.zip
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            TynoRec-update.zip
+            out/TynoRec.exe
+          generate_release_notes: true
