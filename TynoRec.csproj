@@ -10,6 +10,8 @@
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>false</SelfContained>
     <PublishReadyToRun>true</PublishReadyToRun>
+    <PublishSingleFile>true</PublishSingleFile>
+    <DebugType>embedded</DebugType>
     <TieredPGO>false</TieredPGO>
     <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
     <InvariantGlobalization>false</InvariantGlobalization>
@@ -20,6 +22,5 @@
   </ItemGroup>
   <ItemGroup>
     <Resource Include="Assets\logo.png" />
-    <Content Include="ffmpeg.exe" Condition="Exists('ffmpeg.exe')" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" Link="ffmpeg.exe" />
   </ItemGroup>
 </Project>

@@ -209,13 +209,20 @@ namespace TynoRec
                 Refresh();
                 InitAccount();
                 RecentRefresh();
-                if (cfg.AutoCap) StartCapture();
+                BootCapture();
                 _ = Task.Delay(5000).ContinueWith(_ => Dispatcher.Invoke(AutoClean));
             };
             Closing += OnClosing;
             IsVisibleChanged += (_, _) => OnVisibility();
             StateChanged += (_, _) => OnVisibility();
             LibRefresh(null, null);
+        }
+
+        // Premier lancement : si ffmpeg est absent, on le télécharge (une fois) avant de démarrer la capture automatique.
+        async void BootCapture()
+        {
+            if (!Updater.HasFFmpeg(cfg.FFmpeg, dataDir)) await Updater.EnsureFFmpegAsync(dataDir);
+            if (cfg.AutoCap) StartCapture();
         }
 
         // L'interface ne travaille que si on la voit. Cachée / réduite : plus de mise à jour d'écran, animations coupées, mode éco, mémoire rendue à Windows.
@@ -629,7 +636,17 @@ namespace TynoRec
             return "cpu";
         }
 
-        string FF { get { var p = Path.Combine(AppContext.BaseDirectory, cfg.FFmpeg); return !Path.IsPathRooted(cfg.FFmpeg) && File.Exists(p) ? p : cfg.FFmpeg; } }
+        string FF
+        {
+            get
+            {
+                if (Path.IsPathRooted(cfg.FFmpeg)) return cfg.FFmpeg;
+                var p = Path.Combine(AppContext.BaseDirectory, cfg.FFmpeg);              // à côté de l'exe
+                if (File.Exists(p)) return p;
+                var d = Path.Combine(dataDir, cfg.FFmpeg);                                // téléchargé au premier lancement
+                return File.Exists(d) ? d : cfg.FFmpeg;                                   // sinon PATH
+            }
+        }
 
         string NvGpu()
         {

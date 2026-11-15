@@ -24,7 +24,7 @@ jobs:
           $v = "${{ github.ref_name }}".TrimStart('v')
           dotnet publish -c Release -r win-x64 --self-contained false -p:Version=$v -o out
 
-      - name: Zip (sans ffmpeg, déjà présent chez les utilisateurs)
+      - name: Zip de mise à jour (l'app est un seul exe ; ffmpeg est téléchargé au premier lancement)
         shell: pwsh
         run: |
           Remove-Item out\ffmpeg.exe -ErrorAction SilentlyContinue
@@ -34,5 +34,7 @@ jobs:
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          files: TynoRec-update.zip
+          files: |
+            TynoRec-update.zip
+            out/TynoRec.exe
           generate_release_notes: true

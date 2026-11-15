@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
+using System.Linq;
 using System.Net.Http;
 using System.Reflection;
 using System.Text;
@@ -24,6 +25,8 @@ namespace TynoRec
         // ====== À REMPLIR ======
         public const string Repo = "Nxsh009/TynoRec";            // le dépôt doit être public
         const string AssetName = "TynoRec-update.zip";            // nom de l'asset joint à chaque release
+        // ffmpeg n'est pas dans l'exe (trop gros) : il est téléchargé une seule fois au premier lancement depuis une release GitHub nommée "ffmpeg"
+        public const string FFmpegUrl = "https://github.com/" + Repo + "/releases/download/ffmpeg/ffmpeg.zip";
         // =======================
 
         static readonly HttpClient http = CreateClient();
@@ -45,14 +48,22 @@ namespace TynoRec
             running = true;
             try
             {
-                using var req = new HttpRequestMessage(HttpMethod.Get, $"https://api.github.com/repos/{Repo}/releases/latest");
+                using var req = new HttpRequestMessage(HttpMethod.Get, $"https://api.github.com/repos/{Repo}/releases?per_page=15");
                 req.Headers.Accept.ParseAdd("application/vnd.github+json");
                 using var resp = await http.SendAsync(req);
                 if (!resp.IsSuccessStatusCode) { if (!silent) Info("Impossible de vérifier les mises à jour (" + (int)resp.StatusCode + ")."); return; }
                 using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
-                var root = doc.RootElement;
-                var tag = root.GetProperty("tag_name").GetString() ?? "";
-                if (!Version.TryParse(tag.TrimStart('v', 'V'), out var latest)) return;
+                // la plus haute version publiée (on ignore les brouillons, les pré-releases et les releases sans numéro comme "ffmpeg")
+                JsonElement root = default; Version latest = null;
+                foreach (var rel in doc.RootElement.EnumerateArray())
+                {
+                    if (rel.TryGetProperty("draft", out var dr) && dr.GetBoolean()) continue;
+                    if (rel.TryGetProperty("prerelease", out var pr) && pr.GetBoolean()) continue;
+                    var tg = rel.GetProperty("tag_name").GetString() ?? "";
+                    if (!Version.TryParse(tg.TrimStart('v', 'V'), out var v)) continue;
+                    if (latest == null || v > latest) { latest = v; root = rel; }
+                }
+                if (latest == null) { if (!silent) Info("Aucune version trouvée sur GitHub."); return; }
                 if (Norm(latest) <= Norm(Current)) { if (!silent) Info("TynoRec est à jour (v" + Current.ToString(3) + ")."); return; }
 
                 string url = null;
@@ -104,6 +115,68 @@ namespace TynoRec
             return t.Length > 500 ? t.Substring(0, 500) + "…" : t;
         }
 
+        static async Task DownloadAsync(string url, string path, UpdateWindow win)
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Get, url);
+            req.Headers.Accept.ParseAdd("application/octet-stream");
+            using var r = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead);
+            r.EnsureSuccessStatusCode();
+            var total = r.Content.Headers.ContentLength ?? -1;
+            using var s = await r.Content.ReadAsStreamAsync();
+            using var fs = File.Create(path);
+            var buf = new byte[81920]; long read = 0; int n;
+            while ((n = await s.ReadAsync(buf, 0, buf.Length)) > 0)
+            {
+                await fs.WriteAsync(buf, 0, n);
+                read += n;
+                if (total > 0) win.SetProgress((double)read / total);
+            }
+        }
+
+        /// <summary>true si ffmpeg est déjà là (à côté de l'app, dans le dossier de données de TynoRec, ou dans le PATH).</summary>
+        public static bool HasFFmpeg(string configured, string dataDir)
+        {
+            if (string.IsNullOrWhiteSpace(configured)) configured = "ffmpeg.exe";
+            if (Path.IsPathRooted(configured)) return File.Exists(configured);
+            if (File.Exists(Path.Combine(AppContext.BaseDirectory, configured))) return true;
+            if (File.Exists(Path.Combine(dataDir, configured))) return true;
+            foreach (var d in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(';'))
+                try { if (d.Length > 0 && File.Exists(Path.Combine(d.Trim('"'), configured))) return true; } catch { }
+            return false;
+        }
+
+        /// <summary>Premier lancement : télécharge ffmpeg.exe dans le dossier de données de TynoRec (une seule fois, jamais touché par les mises à jour).</summary>
+        public static async Task EnsureFFmpegAsync(string dir)
+        {
+            var win = new UpdateWindow("Composant manquant", "TynoRec a besoin de ffmpeg pour enregistrer. Il sera téléchargé une seule fois (environ 90 Mo).", null, null, "", "Télécharger", "Plus tard");
+            win.Show();
+            if (!await win.Ask()) { win.Close(); return; }
+            var closed = new TaskCompletionSource<bool>();
+            win.Closed += (_, _) => closed.TrySetResult(true);
+            try
+            {
+                Directory.CreateDirectory(dir);
+                var zip = Path.Combine(Path.GetTempPath(), "TynoRecFFmpeg.zip");
+                await DownloadAsync(FFmpegUrl, zip, win);
+                win.SetStatus("Installation…");
+                await Task.Run(() =>
+                {
+                    using var z = ZipFile.OpenRead(zip);
+                    var e = z.Entries.FirstOrDefault(x => x.Name.Equals("ffmpeg.exe", StringComparison.OrdinalIgnoreCase)) ?? throw new Exception("ffmpeg.exe introuvable dans l'archive.");
+                    e.ExtractToFile(Path.Combine(dir, "ffmpeg.exe"), true);
+                });
+                try { File.Delete(zip); } catch { }
+                win.SetProgress(1); win.SetStatus("Prêt !");
+                await Task.Delay(600);
+                win.Close();
+            }
+            catch (Exception ex)
+            {
+                win.Fail("Téléchargement impossible : " + ex.Message);
+                await closed.Task;
+            }
+        }
+
         static async Task InstallAsync(string url, UpdateWindow win)
         {
             var work = Path.Combine(Path.GetTempPath(), "TynoRecUpdate");
@@ -113,22 +186,7 @@ namespace TynoRec
             var zip = Path.Combine(work, "update.zip");
             var src = Path.Combine(work, "files");
 
-            using (var req = new HttpRequestMessage(HttpMethod.Get, url))
-            {
-                req.Headers.Accept.ParseAdd("application/octet-stream");
-                using var r = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead);
-                r.EnsureSuccessStatusCode();
-                var total = r.Content.Headers.ContentLength ?? -1;
-                using var s = await r.Content.ReadAsStreamAsync();
-                using var fs = File.Create(zip);
-                var buf = new byte[81920]; long read = 0; int n;
-                while ((n = await s.ReadAsync(buf, 0, buf.Length)) > 0)
-                {
-                    await fs.WriteAsync(buf, 0, n);
-                    read += n;
-                    if (total > 0) win.SetProgress((double)read / total);
-                }
-            }
+            await DownloadAsync(url, zip, win);
 
             win.SetStatus("Installation…");
             await Task.Run(() => ZipFile.ExtractToDirectory(zip, src, true));
@@ -195,6 +253,9 @@ namespace TynoRec
         }
 
         public UpdateWindow(Version cur, Version latest, string notes)
+            : this("Mise à jour disponible", "Une nouvelle version de TynoRec est prête.", "v" + cur.ToString(3), "v" + latest.ToString(3), notes, "Mettre à jour", "Plus tard") { }
+
+        public UpdateWindow(string title, string sub, string pillLeft, string pillRight, string notes, string yesText, string noText)
         {
             WindowStyle = WindowStyle.None; AllowsTransparency = true; Background = Brushes.Transparent; ResizeMode = ResizeMode.NoResize;
             SizeToContent = SizeToContent.Height; Width = 448; WindowStartupLocation = WindowStartupLocation.CenterScreen; Topmost = true;
@@ -210,19 +271,22 @@ namespace TynoRec
             try { logo.Source = new BitmapImage(new Uri("pack://application:,,,/Assets/logo.png")); } catch { }
             head.Children.Add(logo);
             var titles = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
-            titles.Children.Add(new TextBlock { Text = "Mise à jour disponible", FontSize = 19, FontWeight = FontWeights.SemiBold });
-            titles.Children.Add(new TextBlock { Text = "Une nouvelle version de TynoRec est prête.", FontSize = 12.5, Foreground = Hx("#8B93A7"), Margin = new Thickness(0, 2, 0, 0) });
+            titles.Children.Add(new TextBlock { Text = title, FontSize = 19, FontWeight = FontWeights.SemiBold });
+            titles.Children.Add(new TextBlock { Text = sub, FontSize = 12.5, Foreground = Hx("#8B93A7"), Margin = new Thickness(0, 2, 0, 0), TextWrapping = TextWrapping.Wrap });
             Grid.SetColumn(titles, 1); head.Children.Add(titles);
             body.Children.Add(head);
 
-            // pastille de version
-            var pill = new Border { CornerRadius = new CornerRadius(8), Background = Hx("#16284A"), Padding = new Thickness(12, 6, 12, 6), HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 18, 0, 0) };
-            var pt = new TextBlock { FontSize = 13, FontWeight = FontWeights.SemiBold, Foreground = Hx("#6FA3FF") };
-            pt.Inlines.Add(new System.Windows.Documents.Run("v" + cur.ToString(3)) { Foreground = Hx("#8B93A7") });
-            pt.Inlines.Add(new System.Windows.Documents.Run("   →   "));
-            pt.Inlines.Add(new System.Windows.Documents.Run("v" + latest.ToString(3)));
-            pill.Child = pt;
-            body.Children.Add(pill);
+            // pastille de version (absente pour un simple téléchargement)
+            if (pillRight != null)
+            {
+                var pill = new Border { CornerRadius = new CornerRadius(8), Background = Hx("#16284A"), Padding = new Thickness(12, 6, 12, 6), HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 18, 0, 0) };
+                var pt = new TextBlock { FontSize = 13, FontWeight = FontWeights.SemiBold, Foreground = Hx("#6FA3FF") };
+                pt.Inlines.Add(new System.Windows.Documents.Run(pillLeft) { Foreground = Hx("#8B93A7") });
+                pt.Inlines.Add(new System.Windows.Documents.Run("   →   "));
+                pt.Inlines.Add(new System.Windows.Documents.Run(pillRight));
+                pill.Child = pt;
+                body.Children.Add(pill);
+            }
 
             // nouveautés (seulement s'il y en a)
             if (!string.IsNullOrWhiteSpace(notes))
@@ -250,8 +314,8 @@ namespace TynoRec
 
             // boutons
             var btns = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 22, 0, 0) };
-            no = MakeButton("Plus tard", false);
-            yes = MakeButton("Mettre à jour", true);
+            no = MakeButton(noText, false);
+            yes = MakeButton(yesText, true);
             no.Click += (_, _) => choice.TrySetResult(false);
             yes.Click += (_, _) => { busy = true; yes.IsEnabled = false; no.IsEnabled = false; progress.Visibility = Visibility.Visible; choice.TrySetResult(true); };
             btns.Children.Add(no); btns.Children.Add(yes);
