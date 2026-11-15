@@ -44,7 +44,9 @@ namespace TynoRec
             {
                 if (state == "off") { dot.BeginAnimation(OpacityProperty, null); dot.Effect = null; return; }
                 dot.Effect = new DropShadowEffect { Color = c, BlurRadius = 14, ShadowDepth = 0, Opacity = 0.9 };
-                dot.BeginAnimation(OpacityProperty, new DoubleAnimation(1, 0.4, TimeSpan.FromMilliseconds(state == "rec" ? 600 : 1000)) { AutoReverse = true, RepeatBehavior = RepeatBehavior.Forever, EasingFunction = new SineEase() });
+                var pulse = new DoubleAnimation(1, 0.4, TimeSpan.FromMilliseconds(state == "rec" ? 600 : 1000)) { AutoReverse = true, RepeatBehavior = RepeatBehavior.Forever, EasingFunction = new SineEase() };
+                Timeline.SetDesiredFrameRate(pulse, 12);   // une animation infinie force un rendu en continu : à 12 i/s la pulsation reste douce et coûte ~5x moins
+                dot.BeginAnimation(OpacityProperty, pulse);
             }
             catch { }
         }

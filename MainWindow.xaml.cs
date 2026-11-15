@@ -41,7 +41,7 @@ namespace TynoRec
         public int BufSec { get; set; } = 30;
         public string Audio { get; set; } = "";
         public int Noise { get; set; } = 2;           // réduction de bruit micro : 0 off, 1 légère, 2 moyenne, 3 forte
-        public int Vibrance { get; set; } = 80;       // couleurs éclatantes des clips (0 = off, 100 = max), comme l'éclat numérique NVIDIA
+        public int Vibrance { get; set; } = 40;       // couleurs éclatantes des clips (0 = off, 100 = max), comme l'éclat numérique NVIDIA
         public int DfAtten { get; set; } = 45;        // limite d'atténuation de l'IA en dB (plus bas = voix mieux préservée, un peu plus de bruit ; 100 = max)
         public int AudioOffsetMs { get; set; } = 0;   // réglage fin de synchro micro (+ = micro plus tard), modifiable dans config.json
         public string Out { get; set; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyVideos), "TynoRec");
@@ -56,6 +56,7 @@ namespace TynoRec
         public int AutoDelDays { get; set; } = 0;     // 0 = jamais ; sinon supprime les clips (hors favoris) plus vieux que N jours
         public bool CloudSync { get; set; } = true;     // sauvegarde des clips dans le compte
         public bool TrayTip { get; set; } = false;       // info "TynoRec reste en arrière-plan" déjà montrée
+        public string EncQ { get; set; } = "balanced";   // qualité d'encodage GPU : "perf" (le plus léger) | "balanced" | "quality" ; repli automatique sur "perf" si le pilote refuse
         public string Capture { get; set; } = "wgc";   // "wgc" = Windows Graphics Capture (essayé en premier, repli auto sur ddagrab) ; "dda" = ddagrab uniquement
     }
 
@@ -171,7 +172,7 @@ namespace TynoRec
         {
             InitializeComponent();
             var avTimer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
-            avTimer.Tick += (a, b) => AvRefresh();
+            avTimer.Tick += (a, b) => { if (UiLive) AvRefresh(); };
             avTimer.Start();
             SourceInitialized += (a2, b2) =>
             {
@@ -211,7 +212,25 @@ namespace TynoRec
                 _ = Task.Delay(5000).ContinueWith(_ => Dispatcher.Invoke(AutoClean));
             };
             Closing += OnClosing;
+            IsVisibleChanged += (_, _) => OnVisibility();
+            StateChanged += (_, _) => OnVisibility();
             LibRefresh(null, null);
+        }
+
+        // L'interface ne travaille que si on la voit. Cachée / réduite : plus de mise à jour d'écran, animations coupées, mode éco, mémoire rendue à Windows.
+        bool UiLive => IsVisible && WindowState != WindowState.Minimized;
+
+        void OnVisibility()
+        {
+            bool live = UiLive;
+            Perf.Eco(!live);
+            dotFxState = "";
+            if (live) { Refresh(); AvRefresh(); }
+            else
+            {
+                try { dot.BeginAnimation(OpacityProperty, null); } catch { }
+                _ = Task.Delay(3000).ContinueWith(_ => Dispatcher.BeginInvoke(new Action(() => { if (!UiLive) Task.Run(Perf.Trim); })));
+            }
         }
 
         void SanitizeCfg()
@@ -230,8 +249,10 @@ namespace TynoRec
             if (cfg.BufSec < 5) cfg.BufSec = 30;
             if (cfg.AfterSec < 0) cfg.AfterSec = 0;
             if (cfg.Ver < 2) { cfg.Codec = "h264"; cfg.Ver = 2; }   // v2 : h264 par défaut (moins de lag, lecture fluide)
+            if (cfg.Ver < 3) { if (cfg.Vibrance == 80) cfg.Vibrance = 40; cfg.Ver = 3; }   // v3 : couleurs plus naturelles (l'ancien réglage par défaut était trop saturé)
             cfg.Codec = cfg.Codec == "hevc" ? "hevc" : "h264";
             cfg.Encoder = cfg.Encoder == "CPU" ? "CPU" : "GPU";
+            if (cfg.EncQ != "perf" && cfg.EncQ != "quality") cfg.EncQ = "balanced";
             cfg.Capture = cfg.Capture == "dda" ? "dda" : "wgc";
         }
 
@@ -465,6 +486,7 @@ namespace TynoRec
             cBit.ItemsSource = new[] { O("3M", 3), O("5M", 5), O("7M", 7), O("10M", 10), O("15M", 15), O("20M", 20), O("25M", 25), O("30M", 30, Org), O("50M", 50, Org), O("70M", 70, Red), O("100M", 100, Red) };
             cEnc.ItemsSource = new[] { O("GPU", "GPU"), O("CPU", "CPU") };
             cCodec.ItemsSource = new[] { O("H264", "h264"), O("H265", "hevc") };
+            cQ.ItemsSource = new[] { O("Performance", "perf"), O("Équilibré", "balanced"), O("Qualité", "quality") };
             FillGpuCombo();
             var bl = new List<Opt>();
             foreach (var sec in new[] { 10, 15, 20, 30, 45, 60, 90, 120, 180, 300 }) bl.Add(O(sec < 60 ? sec + " secondes" : sec % 60 == 0 ? (sec / 60 == 1 ? "1 minute" : sec / 60 + " minutes") : sec + " secondes", sec));
@@ -507,7 +529,7 @@ namespace TynoRec
         {
             loadingQ = true;
             cRes.SelectedValue = cfg.Res; cFps.SelectedValue = cfg.Fps; cBit.SelectedValue = cfg.Mbps;
-            cEnc.SelectedValue = cfg.Encoder == "CPU" ? "CPU" : "GPU"; cCodec.SelectedValue = cfg.Codec == "h264" ? "h264" : "hevc"; cGpu.SelectedValue = cfg.GpuIdx;
+            cEnc.SelectedValue = cfg.Encoder == "CPU" ? "CPU" : "GPU"; cCodec.SelectedValue = cfg.Codec == "h264" ? "h264" : "hevc"; cGpu.SelectedValue = cfg.GpuIdx; cQ.SelectedValue = cfg.EncQ;
             if (cGpu.SelectedIndex < 0) cGpu.SelectedIndex = 0;
             loadingQ = false;
             var cards = new[] { qLow, qStd, qHigh, qCus };
@@ -517,7 +539,7 @@ namespace TynoRec
                 cards[i].Background = new SolidColorBrush(i == cfg.Mode ? Color.FromRgb(0x14, 0x26, 0x4A) : Color.FromRgb(0x12, 0x15, 0x1C));
             }
             rowCustom.Visibility = cfg.Mode == 3 ? Visibility.Visible : Visibility.Collapsed;
-            cGpu.IsEnabled = cfg.Encoder != "CPU";
+            cGpu.IsEnabled = cfg.Encoder != "CPU"; cQ.IsEnabled = cfg.Encoder != "CPU";
             var p = Cur();
             presetInfo.Text = $"{p.H}p · {p.Fps} fps · {RateMbps(p)} Mb/s · ~{RateMbps(p) * 0.45:0} Mo/min";
         }
@@ -537,6 +559,7 @@ namespace TynoRec
             if (cBit.SelectedValue is int b) cfg.Mbps = b;
             if (cEnc.SelectedValue is string en) cfg.Encoder = en;
             if (cCodec.SelectedValue is string c) cfg.Codec = c;
+            if (cQ.SelectedValue is string eq) cfg.EncQ = eq;
             if (cGpu.SelectedValue is int g) cfg.GpuIdx = g;
             QApply();
         }
@@ -558,11 +581,11 @@ namespace TynoRec
             int v = Math.Clamp(cfg.Vibrance, 0, 100);
             if (v == 0) return "-c:v copy";
             var inv = CultureInfo.InvariantCulture;
-            string sat = (1 + v / 100.0 * 0.45).ToString("0.###", inv), con = (1 + v / 100.0 * 0.04).ToString("0.###", inv), vib = (v / 100.0 * 0.8).ToString("0.###", inv);
+            string sat = (1 + v / 100.0 * 0.30).ToString("0.###", inv), con = (1 + v / 100.0 * 0.03).ToString("0.###", inv), vib = (v / 100.0 * 0.5).ToString("0.###", inv);   // dosage doux : rendu naturel, pas d'effet "numérique" trop saturé
             string vf = $"-vf \"eq=saturation={sat}:contrast={con},vibrance=intensity={vib},format=yuv420p\"";
             var p = Cur(); var enc = Encoder(); int b = Math.Max(4, RateMbps(p));
             string rate = $"-b:v {b}M -maxrate {b * 2}M -bufsize {b * 2}M -g {Math.Max(1, p.Fps) * 2}";
-            string v2 = enc.EndsWith("nvenc") ? $"-c:v {enc} -preset p5 -rc vbr -cq 20 {rate}"
+            string v2 = enc.EndsWith("nvenc") ? $"-c:v {enc} -preset p6 -tune hq -rc vbr -cq 18 -spatial-aq 1 {rate}"
                       : enc.EndsWith("amf") ? $"-c:v {enc} -quality quality -rc vbr_peak {rate}"
                       : enc.EndsWith("qsv") ? $"-c:v {enc} -preset medium {rate}"
                       : enc == "libx265" ? $"-c:v {enc} -preset veryfast -crf 20"
@@ -635,7 +658,7 @@ namespace TynoRec
                 _ => $"-c:v {enc} -preset ultrafast -tune zerolatency {rate}"
             };
             a.Add(v);
-            if (aud) a.Add("-af aresample=async=1000:first_pts=0 -c:a aac -b:a 160k");
+            if (aud) a.Add("-af aresample=async=1000:first_pts=0 -c:a aac -b:a 192k");
             Directory.CreateDirectory(bufDir);
             a.Add("-fps_mode cfr -max_muxing_queue_size 2048 -max_interleave_delta 1000000");
             a.Add($"-f segment -segment_time {SegSec} -segment_format mpegts -strftime 1 \"{bufDir}\\%Y%m%d_%H%M%S.ts\"");
@@ -664,7 +687,7 @@ namespace TynoRec
             return (w, h);
         }
 
-        string BuildGpu(bool scale, int nw, int nh, bool wgc = false)
+        string BuildGpu(bool scale, int nw, int nh, bool wgc = false, int q = 0)   // q : 0 = performance (le plus léger), 1 = équilibré, 2 = qualité
         {
             var p = Cur(); var enc = Encoder(); int b = RateMbps(p);
             bool nv = enc.EndsWith("nvenc"), amf = enc.EndsWith("amf"), qsv = enc.EndsWith("qsv");
@@ -682,13 +705,18 @@ namespace TynoRec
             else if (qsv) vf = scale ? $"hwmap=derive_device=qsv,format=qsv,vpp_qsv=w={tw}:h={th}:format=nv12" : "hwmap=derive_device=qsv,format=qsv";
             if (vf != null) a.Add($"-vf \"{vf}\"");
 
-            string rate = $"-b:v {b}M -maxrate {b * 3 / 2}M -bufsize {b * 2}M -g {p.Fps * 2} -bf 0";
-            string v = nv ? $"-c:v {enc} -preset p1 -tune ull -rc vbr -multipass disabled -rc-lookahead 0 -zerolatency 1{NvGpu()} {rate}"
+            string rate = $"-b:v {b}M -maxrate {b * 3 / 2}M -bufsize {b * 2}M -g {p.Fps * 2} -bf {(q > 0 ? 2 : 0)}";
+            string v;
+            // un replay buffer n'a pas besoin de latence ultra faible : l'encodeur matériel (bloc séparé des coeurs du jeu) peut prendre plus de temps par image pour une image plus propre
+            if (q > 0 && nv) v = $"-c:v {enc} -preset {(q == 1 ? "p4" : "p6")} -tune hq -rc vbr -multipass {(q == 1 ? "qres" : "fullres")} -spatial-aq 1{(q == 2 ? " -temporal-aq 1" : "")}{NvGpu()} {rate}";
+            else if (q > 0 && amf) v = $"-c:v {enc} -usage transcoding -quality {(q == 1 ? "balanced" : "quality")} -rc vbr_peak {rate}";
+            else if (q > 0 && qsv) v = $"-c:v {enc} -preset {(q == 1 ? "medium" : "slow")} {rate}";
+            else v = nv ? $"-c:v {enc} -preset p1 -tune ull -rc vbr -multipass disabled -rc-lookahead 0 -zerolatency 1{NvGpu()} {rate}"
                      : amf ? $"-c:v {enc} -usage ultralowlatency -quality speed -rc vbr_peak {rate}"
                      : qsv ? $"-c:v {enc} -preset veryfast -async_depth 1 {rate}"
                      : $"-c:v {enc} -preset ultrafast{(enc == "libx264" ? " -tune zerolatency" : "")} {rate}";
             a.Add(v);
-            if (aud) a.Add("-af aresample=async=1000:first_pts=0 -c:a aac -b:a 160k");
+            if (aud) a.Add("-af aresample=async=1000:first_pts=0 -c:a aac -b:a 192k");
             Directory.CreateDirectory(bufDir);
             a.Add("-fps_mode cfr -max_muxing_queue_size 2048 -max_interleave_delta 1000000");
             a.Add($"-f segment -segment_time {SegSec} -segment_format mpegts -strftime 1 \"{bufDir}\\%Y%m%d_%H%M%S.ts\"");
@@ -708,13 +736,20 @@ namespace TynoRec
             {
                 var (nw, nh) = NativeSize();
                 var p = Cur();
+                var combos = new List<(string n, bool scale, bool wgc)>();
                 if (cfg.Capture == "wgc")
                 {
-                    if (nh == 0 || p.H < nh) l.Add(("GPU direct (WGC)", BuildGpu(true, nw, nh, true)));
-                    l.Add(("GPU résolution native (WGC)", BuildGpu(false, nw, nh, true)));
+                    if (nh == 0 || p.H < nh) combos.Add(("GPU direct (WGC)", true, true));
+                    combos.Add(("GPU résolution native (WGC)", false, true));
                 }
-                if (nh == 0 || p.H < nh) l.Add(("GPU direct", BuildGpu(true, nw, nh)));
-                l.Add(("GPU résolution native", BuildGpu(false, nw, nh)));
+                if (nh == 0 || p.H < nh) combos.Add(("GPU direct", true, false));
+                combos.Add(("GPU résolution native", false, false));
+                int ql = cfg.EncQ == "quality" ? 2 : cfg.EncQ == "balanced" ? 1 : 0;
+                foreach (var c in combos)
+                {
+                    if (ql > 0) l.Add((c.n + " · " + (ql == 2 ? "qualité" : "équilibré"), BuildGpu(c.scale, nw, nh, c.wgc, ql)));   // si le pilote refuse ces réglages, on passe au palier suivant = les réglages d'origine
+                    l.Add((c.n, BuildGpu(c.scale, nw, nh, c.wgc, 0)));
+                }
             }
             l.Add(("compatibilité", BuildLegacy()));
             return l;
@@ -725,7 +760,7 @@ namespace TynoRec
         // Les changements de réglages sont regroupés (600 ms) et ne redémarrent ffmpeg que si quelque chose a vraiment changé.
         void QueueApply() { applyT.Stop(); applyT.Start(); }
 
-        string Sig() => $"{Cur()}|{cfg.Encoder}|{cfg.Codec}|{cfg.GpuIdx}|{cfg.Monitor}|{cfg.Audio}|{cfg.Noise}|{cfg.Mouse}|{cfg.FFmpeg}";
+        string Sig() => $"{Cur()}|{cfg.Encoder}|{cfg.Codec}|{cfg.EncQ}|{cfg.GpuIdx}|{cfg.Monitor}|{cfg.Audio}|{cfg.Noise}|{cfg.Mouse}|{cfg.FFmpeg}";
 
         async void ApplyChange()
         {
@@ -917,11 +952,11 @@ namespace TynoRec
                 Directory.CreateDirectory(audDir);
                 lock (epochLock) { aq.Clear(); aEpoch = double.NaN; }
                 var args = $"-hide_banner -loglevel error -y -progress pipe:1 -stats_period 0.5 -thread_queue_size 1024 -use_wallclock_as_timestamps 1 " +
-                           $"-f dshow -audio_buffer_size 80 -i audio=\"{cfg.Audio}\" -af \"{AudioFilter()}\" -c:a aac -b:a 160k " +
+                           $"-f dshow -audio_buffer_size 80 -i audio=\"{cfg.Audio}\" -af \"{AudioFilter()}\" -c:a aac -b:a 192k " +
                            $"-f segment -segment_time {SegSec} -segment_format mpegts -strftime 1 \"{audDir}\\%Y%m%d_%H%M%S.ts\"";
                 var psi = new ProcessStartInfo(FF, args) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true };
                 var proc = Process.Start(psi);
-                JobKill.Add(proc);
+                JobKill.Add(proc); Perf.NoThrottle(proc);
                 try { proc.PriorityClass = ProcessPriorityClass.AboveNormal; } catch { }
                 proc.ErrorDataReceived += (_, e) => { };
                 proc.OutputDataReceived += (_, e) => Progress(e.Data, false);
@@ -1029,7 +1064,7 @@ namespace TynoRec
                 var psi = new ProcessStartInfo(FF, t.args) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true };
                 lock (epochLock) { vq.Clear(); vEpoch = double.NaN; vstat.Clear(); sFr = sDup = sDrop = 0; }
                 var proc = Process.Start(psi);
-                JobKill.Add(proc);
+                JobKill.Add(proc); Perf.NoThrottle(proc);
                 try { proc.PriorityClass = ProcessPriorityClass.High; proc.PriorityBoostEnabled = true; } catch { }
                 proc.ErrorDataReceived += (_, e) => { if (e.Data != null) lock (errs) { if (errs.Length < 4000) errs.AppendLine(e.Data); } };
                 proc.BeginErrorReadLine();
@@ -1059,7 +1094,8 @@ namespace TynoRec
             catch { }
             bool quick = (DateTime.Now - started).TotalSeconds < 6;
             if (quick && tier + 1 < tiers.Count) { tier++; Launch(); return; }        // palier refusé -> palier suivant
-            if (!quick && tier + 1 < tiers.Count && tiers[tier].name.Contains("WGC")) { tier++; Launch(); return; }   // la capture WGC a lâché en cours de route -> on repasse sur ddagrab
+            if (!quick && tiers[tier].name.Contains(" · ") && tier + 1 < tiers.Count) { tier++; Launch(); return; }   // réglages qualité trop lourds pour cette machine (plantage en cours de route) -> retour aux réglages d'origine, les plus légers
+            if (!quick && tiers[tier].name.Contains("WGC")) { int nx = tiers.FindIndex(tier + 1, x => !x.name.Contains("WGC")); if (nx >= 0) { tier = nx; Launch(); return; } }   // la capture WGC a lâché en cours de route -> on repasse sur ddagrab
             if (!quick)                                                                // plantage en cours de route -> relance silencieuse (3 max / minute)
             {
                 crashes.RemoveAll(d => (DateTime.Now - d).TotalSeconds > 60);
@@ -1102,11 +1138,11 @@ namespace TynoRec
                         if (Directory.Exists(bufDir))
                         {
                             var limit = DateTime.Now.AddSeconds(-keep);
-                            foreach (var f in Directory.GetFiles(bufDir, "*.ts"))
+                            foreach (var fi in new DirectoryInfo(bufDir).EnumerateFiles("*.ts"))   // une seule énumération : les dates arrivent avec les noms (pas un appel disque par fichier)
                             {
-                                var w = File.GetLastWriteTime(f);
+                                var w = fi.LastWriteTime;
                                 if (w > newest) newest = w;
-                                if (!rec && !busy && w < limit) try { File.Delete(f); } catch { }   // jamais pendant un enregistrement ou un export
+                                if (!rec && !busy && w < limit) try { fi.Delete(); } catch { }   // jamais pendant un enregistrement ou un export
                             }
                         }
                     }
@@ -1116,7 +1152,7 @@ namespace TynoRec
                         if (!rec && !busy && Directory.Exists(audDir))
                         {
                             var limitA = DateTime.Now.AddSeconds(-keep);
-                            foreach (var f in Directory.GetFiles(audDir, "*.ts")) if (File.GetLastWriteTime(f) < limitA) try { File.Delete(f); } catch { }
+                            foreach (var fi in new DirectoryInfo(audDir).EnumerateFiles("*.ts")) if (fi.LastWriteTime < limitA) try { fi.Delete(); } catch { }
                         }
                     }
                     catch { }
@@ -1124,11 +1160,11 @@ namespace TynoRec
                     var last = newest == DateTime.MinValue ? started : newest;
                     return c != null && (DateTime.Now - started).TotalSeconds > 15 && (DateTime.Now - last).TotalSeconds > 12;
                 });
-                UpdateNow();
+                if (UiLive) UpdateNow();
                 if (stale && ReferenceEquals(cap, c)) { try { c.Kill(); } catch { } }   // OnCapExit relance proprement
             }
             finally { hkBusy = false; }
-            Refresh();
+            if (UiLive) Refresh();
         }
 
         void Toast(string t)
@@ -1311,8 +1347,8 @@ namespace TynoRec
                 foreach (var d in audioDevs) a.Add(O(d, d));
                 if (!string.IsNullOrEmpty(cfg.Audio) && !audioDevs.Contains(cfg.Audio)) a.Add(O(cfg.Audio, cfg.Audio));
                 cAud.ItemsSource = a; cAud.SelectedValue = cfg.Audio ?? "";
-                cColor.ItemsSource = new List<Opt> { O("Désactivées (couleurs d'origine)", 0), O("Légères", 40), O("Éclatantes (recommandé)", 80), O("Très éclatantes", 100) };
-                { var cv = new[] { 0, 40, 80, 100 }.OrderBy(x => Math.Abs(x - cfg.Vibrance)).First(); cColor.SelectedValue = cv; }
+                cColor.ItemsSource = new List<Opt> { O("Désactivées (couleurs d'origine)", 0), O("Très légères", 20), O("Légères (recommandé)", 40), O("Éclatantes", 70), O("Très éclatantes", 100) };
+                { var cv = new[] { 0, 20, 40, 70, 100 }.OrderBy(x => Math.Abs(x - cfg.Vibrance)).First(); cColor.SelectedValue = cv; }
                 cNoise.ItemsSource = new List<Opt> { O("Désactivée", 0), O("Légère", 1), O("Moyenne (recommandé)", 2), O("Forte", 3), O("Maximum IA — voix uniquement", 4) };
                 cNoise.SelectedValue = Math.Clamp(cfg.Noise, 0, 4);
                 noiseHint.Text = NoiseHint();
@@ -1685,6 +1721,7 @@ namespace TynoRec
         }
         void TitleKey(object s, KeyEventArgs e) { if (e.Key == Key.Enter || e.Key == Key.Escape) { Keyboard.Focus(this); e.Handled = true; } }
 
+        uint cgPid; DateTime cgAt;
         string CurrentGame()
         {
             try
@@ -1693,6 +1730,9 @@ namespace TynoRec
                 GetWindowThreadProcessId(hw, out var pid);
                 if (pid != 0 && pid != Environment.ProcessId)
                 {
+                    // même programme qu'il y a moins de 30 s : inutile de refaire la liste des processus Windows toutes les 2 s pendant la partie
+                    if (pid == cgPid && (DateTime.UtcNow - cgAt).TotalSeconds < 30) return lastGame;
+                    cgPid = pid; cgAt = DateTime.UtcNow;
                     using var p = Process.GetProcessById((int)pid);
                     var n = p.ProcessName;
                     if (!IgnoredProcs.Contains(n))
@@ -1738,7 +1778,7 @@ namespace TynoRec
                 try
                 {
                     var psi = new ProcessStartInfo(FF, $"-hide_banner -i \"{file}\"") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true };
-                    using var p = Process.Start(psi); try { p.PriorityClass = ProcessPriorityClass.BelowNormal; } catch { } var err = p.StandardError.ReadToEnd(); p.WaitForExit();
+                    using var p = Process.Start(psi); try { p.PriorityClass = ProcessPriorityClass.Idle; } catch { } var err = p.StandardError.ReadToEnd(); p.WaitForExit();
                     var m = Regex.Match(err, @"Duration: (\d+):(\d+):(\d+)\.(\d+)");
                     if (m.Success) dur = int.Parse(m.Groups[1].Value) * 3600 + int.Parse(m.Groups[2].Value) * 60 + int.Parse(m.Groups[3].Value)
                                        + double.Parse("0." + m.Groups[4].Value, CultureInfo.InvariantCulture);
@@ -1750,8 +1790,8 @@ namespace TynoRec
                 try
                 {
                     var ss = (dur / 3).ToString("0.##", CultureInfo.InvariantCulture);
-                    var psi = new ProcessStartInfo(FF, $"-y -loglevel error -ss {ss} -i \"{file}\" -frames:v 1 -vf scale=360:-2 -q:v 4 \"{thumb}\"") { UseShellExecute = false, CreateNoWindow = true };
-                    using var p = Process.Start(psi); try { p.PriorityClass = ProcessPriorityClass.BelowNormal; } catch { } p.WaitForExit();
+                    var psi = new ProcessStartInfo(FF, $"-y -loglevel error -threads 1 -ss {ss} -i \"{file}\" -frames:v 1 -vf scale=360:-2 -q:v 4 \"{thumb}\"") { UseShellExecute = false, CreateNoWindow = true };
+                    using var p = Process.Start(psi); try { p.PriorityClass = ProcessPriorityClass.Idle; } catch { } p.WaitForExit();
                 }
                 catch { }
             }
@@ -1903,7 +1943,13 @@ namespace TynoRec
             headLine.Height = Math.Max(0, tl.ActualHeight - 16);
         }
 
-        void TlSize(object s, SizeChangedEventArgs e) { DrawRuler(); PlaceHead(media.Position.TotalSeconds); TrimLayout(); }
+        DispatcherTimer tlT;
+        void TlSize(object s, SizeChangedEventArgs e)
+        {
+            PlaceHead(media.Position.TotalSeconds);   // la tête de lecture suit tout de suite
+            if (tlT == null) { tlT = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(45) }; tlT.Tick += (_, _) => { tlT.Stop(); DrawRuler(); TrimLayout(); }; }
+            tlT.Stop(); tlT.Start();                  // la règle (des dizaines d'éléments) n'est reconstruite qu'une fois la taille stabilisée, pas à chaque pixel
+        }
 
         void DrawRuler()
         {
@@ -1949,7 +1995,7 @@ namespace TynoRec
                         if (!File.Exists(f))
                         {
                             var ss = t.ToString("0.##", CultureInfo.InvariantCulture);
-                            var psi = new ProcessStartInfo(FF, $"-y -loglevel error -ss {ss} -i \"{file}\" -frames:v 1 -vf \"scale=192:108:force_original_aspect_ratio=increase,crop=192:108\" -q:v 5 \"{f}\"") { UseShellExecute = false, CreateNoWindow = true };
+                            var psi = new ProcessStartInfo(FF, $"-y -loglevel error -threads 1 -ss {ss} -i \"{file}\" -frames:v 1 -vf \"scale=192:108:force_original_aspect_ratio=increase,crop=192:108\" -q:v 5 \"{f}\"") { UseShellExecute = false, CreateNoWindow = true };
                             using var p = Process.Start(psi); try { p.PriorityClass = ProcessPriorityClass.BelowNormal; } catch { } p.WaitForExit();
                         }
                         if (File.Exists(f)) return (ImageSource)LoadImg(f);
@@ -2166,7 +2212,7 @@ namespace TynoRec
                 }
                 var ci = CultureInfo.InvariantCulture;
                 string ss = a.ToString("0.###", ci), t = (b - a).ToString("0.###", ci);
-                int rc = Run($"-y -loglevel error -ss {ss} -i \"{src}\" -t {t} -c:v libx264 -preset veryfast -crf 18 -c:a aac -b:a 192k -movflags +faststart \"{outFile}\"");
+                int rc = Run($"-y -loglevel error -ss {ss} -i \"{src}\" -t {t} -c:v libx264 -preset fast -crf 17 -c:a aac -b:a 192k -movflags +faststart \"{outFile}\"");
                 if (rc != 0 || !File.Exists(outFile))
                 {
                     try { File.Delete(outFile); } catch { }
