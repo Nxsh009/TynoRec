@@ -205,6 +205,7 @@ namespace TynoRec
                 HwndSource.FromHwnd(h).AddHook(Hook);
                 IntroFx();
                 InitTray();
+                EnsureStartMenuShortcut();
                 if (Environment.GetCommandLineArgs().Contains("--min")) HideToTray(true);   // lancement avec Windows : directement dans la zone de notification
                 else WindowState = WindowState.Maximized;   // plein écran au lancement
                 RegHotkeys();
@@ -415,6 +416,30 @@ namespace TynoRec
                 BuildWeek(all); BuildTop(all); BuildChips();
                 var tips = new[] { "Appuie sur ta touche de clip juste après une belle action : TynoRec sauve aussi les secondes d'avant.", "Donne un titre à tes clips : clique sur « Sans titre » dans la bibliothèque.", "Clique sur le carré du logo d'un clip pour choisir le logo officiel du jeu.", "Les clips en favori ★ ne sont jamais supprimés par le nettoyage automatique.", "Active « Lancer avec Windows » dans Paramètres pour ne jamais rater un clip.", "Le niveau Maximum IA du micro supprime très bien le bruit de fond." };
                 tipTxt.Text = tips[DateTime.Now.DayOfYear % tips.Length];
+            }
+            catch { }
+        }
+
+        // Raccourci dans le menu Démarrer : TynoRec devient trouvable dans la recherche Windows et la liste des applications (créé / corrigé à chaque lancement)
+        void EnsureStartMenuShortcut()
+        {
+            try
+            {
+                var exe = Environment.ProcessPath;
+                if (string.IsNullOrEmpty(exe) || exe.Replace('/', '\\').Contains("\\bin\\", StringComparison.OrdinalIgnoreCase)) return;   // build de développement : pas de raccourci
+                var lnk = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs), "TynoRec.lnk");
+                var t = Type.GetTypeFromProgID("WScript.Shell"); if (t == null) return;
+                var sh = Activator.CreateInstance(t);
+                var sc = t.InvokeMember("CreateShortcut", System.Reflection.BindingFlags.InvokeMethod, null, sh, new object[] { lnk });
+                var st = sc.GetType();
+                if (File.Exists(lnk))
+                {
+                    var cur = st.InvokeMember("TargetPath", System.Reflection.BindingFlags.GetProperty, null, sc, null) as string;
+                    if (string.Equals(cur, exe, StringComparison.OrdinalIgnoreCase)) return;   // déjà à jour
+                }
+                void Set(string n, string v) => st.InvokeMember(n, System.Reflection.BindingFlags.SetProperty, null, sc, new object[] { v });
+                Set("TargetPath", exe); Set("WorkingDirectory", Path.GetDirectoryName(exe)); Set("Description", "TynoRec - enregistrement et clips"); Set("IconLocation", exe + ",0");
+                st.InvokeMember("Save", System.Reflection.BindingFlags.InvokeMethod, null, sc, null);
             }
             catch { }
         }
