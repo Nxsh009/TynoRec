@@ -195,6 +195,7 @@ namespace TynoRec
             tick.Tick += (_, _) => Housekeeping();
             InitQual();
             LoadUi();
+            verText.Text = "TynoRec v" + Updater.Current.ToString(3);   // version affichée en bas des Paramètres
             gpuTask = DetectGpusAsync();
             Loaded += (_, _) =>
             {
@@ -1856,6 +1857,8 @@ namespace TynoRec
             }
             finally { libBusy = false; if (libAgain) { libAgain = false; LibRefresh(null, null); } }
         }
+
+        async void CheckUpdate(object s, RoutedEventArgs e) => await Updater.CheckAsync(false);
 
         void LibFolder(object s, RoutedEventArgs e) => Process.Start(new ProcessStartInfo(cfg.Out) { UseShellExecute = true });
 

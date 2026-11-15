@@ -409,7 +409,10 @@
           <TextBlock Style="{StaticResource Lbl}" Text="Chemin de ffmpeg.exe"/>
           <DockPanel Margin="0,0,0,16"><Button DockPanel.Dock="Right" Content="Parcourir…" Click="BrowseFF" Margin="8,0,0,0" Padding="14,8"/><TextBox x:Name="tFF" Margin="0"/></DockPanel>
           <Button Style="{StaticResource Dan}" Content="↺  Réinitialiser tous les réglages" Click="ResetSettings" HorizontalAlignment="Left" Margin="0,0,0,16" Padding="16,9"/>
-          <TextBlock Text="TynoRec v26" Foreground="#8B93A7" FontSize="12" Margin="0"/>
+          <StackPanel Orientation="Horizontal">
+            <TextBlock x:Name="verText" Text="TynoRec" Foreground="#8B93A7" FontSize="12" Margin="0" VerticalAlignment="Center"/>
+            <Button Content="Rechercher une mise à jour" Click="CheckUpdate" Margin="14,0,0,0" Padding="10,4" FontSize="12"/>
+          </StackPanel>
         </StackPanel></Border>
         </StackPanel></ScrollViewer>
         <Border Grid.Row="1" Background="#090B10" BorderBrush="#262D3C" BorderThickness="0,1,0,0" Padding="0,12,0,0">
