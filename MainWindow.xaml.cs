@@ -27,6 +27,7 @@ namespace TynoRec
     class Cfg
     {
         public int ClipMod { get; set; } = 0;
+        public string[] ExtraGames { get; set; } = Array.Empty<string>();   // noms de processus de jeux en plus (sans .exe) : l'amélioration des clips attend leur fermeture
         public int ClipVk { get; set; } = 0x77;
         public int RecMod { get; set; } = 0;
         public int RecVk { get; set; } = 0x78;
@@ -63,7 +64,7 @@ namespace TynoRec
 
     class Opt { public string T { get; set; } public Brush C { get; set; } = new SolidColorBrush(Color.FromRgb(0xF1, 0xF4, 0xFA)); public object V { get; set; } public override string ToString() => T; }
 
-    class ClipMeta { public string Game { get; set; } public double Dur { get; set; } public bool Fav { get; set; } public string Uid { get; set; } public string Title { get; set; } }
+    class ClipMeta { public string Game { get; set; } public double Dur { get; set; } public bool Fav { get; set; } public string Uid { get; set; } public string Title { get; set; } public bool EnhC { get; set; } public bool EnhD { get; set; } }
 
     class Vid : INotifyPropertyChanged
     {
@@ -222,7 +223,21 @@ namespace TynoRec
         // Premier lancement : si ffmpeg est absent, on le télécharge (une fois) avant de démarrer la capture automatique.
         async void BootCapture()
         {
+            try { var lg = Path.Combine(dataDir, "ffmpeg.log"); if (File.Exists(lg) && new FileInfo(lg).Length > 1_000_000) File.Delete(lg); } catch { }   // journal limité à ~1 Mo
+            try { foreach (var f in Directory.GetFiles(cfg.Out, "*.mp4.enh")) File.Delete(f); foreach (var f in Directory.GetFiles(cfg.Out, "*.enh.mp4")) File.Delete(f); } catch { }   // restes d'une amélioration interrompue
             if (!Updater.HasFFmpeg(cfg.FFmpeg, dataDir)) await Updater.EnsureFFmpegAsync(dataDir);
+            try
+            {
+                foreach (var kv in meta.ToList())
+                {
+                    if (!kv.Value.EnhC && !kv.Value.EnhD) continue;
+                    var pth = Path.Combine(cfg.Out, kv.Key);
+                    if (File.Exists(pth)) { lock (pendingEnh) pendingEnh.Add((pth, kv.Value.EnhC, kv.Value.EnhD)); }
+                    else { kv.Value.EnhC = false; kv.Value.EnhD = false; }
+                }
+                RunEnhance();
+            }
+            catch { }
             if (cfg.AutoCap) StartCapture();
         }
 
@@ -1084,7 +1099,7 @@ namespace TynoRec
                 lock (epochLock) { vq.Clear(); vEpoch = double.NaN; vstat.Clear(); sFr = sDup = sDrop = 0; }
                 var proc = Process.Start(psi);
                 JobKill.Add(proc); Perf.NoThrottle(proc);
-                try { proc.PriorityClass = ProcessPriorityClass.High; proc.PriorityBoostEnabled = true; } catch { }
+                try { proc.PriorityClass = ProcessPriorityClass.AboveNormal; proc.PriorityBoostEnabled = true; } catch { }
                 proc.ErrorDataReceived += (_, e) => { if (e.Data != null) lock (errs) { if (errs.Length < 4000) errs.AppendLine(e.Data); } };
                 proc.BeginErrorReadLine();
                 proc.OutputDataReceived += (_, e) => Progress(e.Data, true);
@@ -1541,7 +1556,7 @@ namespace TynoRec
             var dfDir = Path.Combine(Path.GetTempPath(), $"TynoRecDF_{stamp}");
             // En jeu : sauvegarde instantanée en simple copie (aucun lag). Couleurs + IA audio sont appliquées plus tard, quand la capture est arrêtée.
             bool wantColor = vcol != "-c:v copy", wantDf = dfExe != null;
-            bool deferEnh = cap != null && (wantColor || wantDf);
+            bool deferEnh = (GameRecent() || FullscreenInFront()) && (wantColor || wantDf);
             if (deferEnh) { vcol = "-c:v copy"; dfExe = null; }
             exporting++;
             Task.Run(() =>
@@ -1559,7 +1574,7 @@ namespace TynoRec
                     int Run(string args)
                     {
                         var psi = new ProcessStartInfo(FF, args) { UseShellExecute = false, CreateNoWindow = true };
-                        using var pr = Process.Start(psi);
+                        using var pr = Process.Start(psi); JobKill.Add(pr);
                         try { pr.PriorityClass = ProcessPriorityClass.Idle; } catch { } OneCore(pr);   // export en priorité minimale : le jeu passe toujours avant
                         pr.WaitForExit();
                         return pr.ExitCode;
@@ -1568,7 +1583,7 @@ namespace TynoRec
                     {
                         var psi = new ProcessStartInfo(exe, args) { UseShellExecute = false, CreateNoWindow = true };
                         psi.Environment["RAYON_NUM_THREADS"] = "1"; psi.Environment["OMP_NUM_THREADS"] = "1";
-                        using var pr = Process.Start(psi);
+                        using var pr = Process.Start(psi); JobKill.Add(pr);
                         try { pr.PriorityClass = ProcessPriorityClass.Idle; } catch { } OneCore(pr);
                         if (!pr.WaitForExit(15 * 60 * 1000)) { try { pr.Kill(); } catch { } return -1; }
                         return pr.ExitCode;
@@ -1644,9 +1659,9 @@ namespace TynoRec
                 try { if (Directory.Exists(dfDir)) Directory.Delete(dfDir, true); } catch { }
                 if (code == 0 && File.Exists(outFile))
                 {
-                    meta[stamp + ".mp4"] = new ClipMeta { Game = game, Uid = Cloud.UserId }; SaveMeta();
+                    meta[stamp + ".mp4"] = new ClipMeta { Game = game, Uid = Cloud.UserId, EnhC = deferEnh && wantColor, EnhD = deferEnh && wantDf }; SaveMeta();
                     if (deferEnh) { lock (pendingEnh) pendingEnh.Add((outFile, wantColor, wantDf)); } else QueueSync();
-                    Snd("saved"); var fw = FpsWarn(); Toast("✔ Clip sauvegardé" + (deferEnh ? " · couleurs après la partie" : "") + (fw != null ? "  " + fw : ""));
+                    Snd("saved"); var fw = FpsWarn(); Toast("✔ Clip sauvegardé" + (deferEnh ? " · amélioration (couleurs / audio) appliquée plus tard" : "") + (fw != null ? "  " + fw : ""));
                     if (fw != null) { try { Directory.CreateDirectory(dataDir); File.AppendAllText(Path.Combine(dataDir, "ffmpeg.log"), $"{DateTime.Now} [{tierName}] {fw}\n\n"); } catch { } }
                 }
                 else
@@ -1662,12 +1677,29 @@ namespace TynoRec
         // ---------- amélioration différée (couleurs + IA audio) ----------
         readonly List<(string path, bool color, bool df)> pendingEnh = new();
         bool enhBusy;
+        // l'amélioration ne démarre qu'une minute après la fin d'un jeu (jamais pendant une partie, même si la capture reste active)
+        DateTime gameSeen = DateTime.MinValue;
+        bool GameRecent() => GameRunning() || (DateTime.UtcNow - gameSeen).TotalSeconds < 60;
+
+        // un programme vu en plein écran est mémorisé comme jeu (liste ExtraGames de la config) : plus besoin de la remplir à la main
+        void LearnGame(string n)
+        {
+            try
+            {
+                if (GameAlias.TryGetValue(n, out var al) && al == "Navigateur") return;
+                if (!FullscreenInFront()) return;
+                var cur = cfg.ExtraGames ?? Array.Empty<string>();
+                if (cur.Length >= 50 || cur.Contains(n, StringComparer.OrdinalIgnoreCase) || GameProcs.Contains(n, StringComparer.OrdinalIgnoreCase)) return;
+                cfg.ExtraGames = cur.Append(n).ToArray(); Persist();
+            }
+            catch { }
+        }
 
         static int ExecIdle(string exe, string args)
         {
             var psi = new ProcessStartInfo(exe, args) { UseShellExecute = false, CreateNoWindow = true };
             psi.Environment["RAYON_NUM_THREADS"] = "2";
-            using var pr = Process.Start(psi);
+            using var pr = Process.Start(psi); JobKill.Add(pr);
             try { pr.PriorityClass = ProcessPriorityClass.Idle; } catch { }
             if (!pr.WaitForExit(15 * 60 * 1000)) { try { pr.Kill(); } catch { } return -1; }
             return pr.ExitCode;
@@ -1680,7 +1712,7 @@ namespace TynoRec
 
         // un jeu connu est ouvert (même en fenêtré / alt-tab / 2e écran) : l'amélioration des clips attend sa fermeture.
         // FullscreenInFront() seul ne suffisait pas : réencodage (CPU + NVDEC/NVENC) en pleine partie => chute de FPS.
-        static readonly string[] GameProcs = { "FortniteClient-Win64-Shipping", "FortniteLauncher", "VALORANT-Win64-Shipping", "cs2", "RocketLeague", "Overwatch", "r5apex", "RainbowSix", "GTA5", "eldenring", "Cyberpunk2077" };
+        static readonly string[] GameProcs = { "FortniteClient-Win64-Shipping", "FortniteLauncher", "VALORANT-Win64-Shipping", "cs2", "RocketLeague", "Overwatch", "r5apex", "RainbowSix", "GTA5", "eldenring", "Cyberpunk2077", "TslGame", "League of Legends", "dota2", "destiny2", "RustClient", "EscapeFromTarkov", "Marvel-Win64-Shipping", "Minecraft.Windows", "FC25", "FC26" };
         DateTime grAt = DateTime.MinValue; bool grVal;
         bool GameRunning()
         {
@@ -1688,8 +1720,9 @@ namespace TynoRec
             grAt = DateTime.UtcNow; grVal = false;
             try
             {
-                foreach (var n in GameProcs)
+                foreach (var n0 in GameProcs.Concat(cfg.ExtraGames ?? Array.Empty<string>()))
                 {
+                    var n = (n0 ?? "").Trim(); if (n.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) n = n[..^4]; if (n.Length == 0) continue;
                     var ps = Process.GetProcessesByName(n);
                     bool on = ps.Length > 0; foreach (var x in ps) x.Dispose();
                     if (on) { grVal = true; break; }
@@ -1697,6 +1730,7 @@ namespace TynoRec
                 if (!grVal && lastGame != null && lastGame != "Bureau" && lastGame != "Navigateur" && FullscreenAnywhere()) grVal = true;
             }
             catch { }
+            if (grVal) gameSeen = DateTime.UtcNow;
             return grVal;
         }
         // plein écran sur n'importe quel moniteur (le jeu peut être sur l'écran secondaire)
@@ -1720,7 +1754,7 @@ namespace TynoRec
             bool any; lock (pendingEnh) any = pendingEnh.Count > 0;
             if (any && enhT == null) { enhT = new DispatcherTimer { Interval = TimeSpan.FromSeconds(8) }; enhT.Tick += (_, _) => RunEnhance(); }
             if (enhT != null) { if (any || enhBusy) enhT.Start(); else enhT.Stop(); }
-            if (enhBusy || cap != null || exporting > 0 || !any || FullscreenInFront() || GameRunning()) return;
+            if (enhBusy || recStart != null || exporting > 0 || !any || FullscreenInFront() || GameRecent()) return;
             (string path, bool color, bool df) job;
             lock (pendingEnh) { if (pendingEnh.Count == 0) return; job = pendingEnh[0]; pendingEnh.RemoveAt(0); }
             enhBusy = true;
@@ -1728,7 +1762,7 @@ namespace TynoRec
             int att = Math.Clamp(cfg.DfAtten, 6, 100);
             Task.Run(() =>
             {
-                var tmp = job.path + ".enh.mp4"; var dir = Path.Combine(Path.GetTempPath(), "TynoRecEnh_" + Guid.NewGuid().ToString("N"));
+                var tmp = job.path + ".enh"; var dir = Path.Combine(Path.GetTempPath(), "TynoRecEnh_" + Guid.NewGuid().ToString("N"));
                 try
                 {
                     if (!File.Exists(job.path)) return false;
@@ -1747,8 +1781,8 @@ namespace TynoRec
                     if (aIn == null && vnow == "-c:v copy") return false;
                     string hw = vnow.Contains("-vf") ? "-hwaccel auto " : "";
                     string args = aIn != null
-                        ? $"-y -loglevel error {hw}-i \"{job.path}\" -i \"{aIn}\" -map 0:v:0 -map 1:a:0 {vnow} -af \"{VoiceClarity}\" -c:a aac -b:a 192k -shortest -movflags +faststart \"{tmp}\""
-                        : $"-y -loglevel error {hw}-i \"{job.path}\" -map 0:v:0 -map 0:a:0? {vnow} -c:a copy -movflags +faststart \"{tmp}\"";
+                        ? $"-y -loglevel error {hw}-i \"{job.path}\" -i \"{aIn}\" -map 0:v:0 -map 1:a:0 {vnow} -af \"{VoiceClarity}\" -c:a aac -b:a 192k -shortest -f mp4 -movflags +faststart \"{tmp}\""
+                        : $"-y -loglevel error {hw}-i \"{job.path}\" -map 0:v:0 -map 0:a:0? {vnow} -c:a copy -f mp4 -movflags +faststart \"{tmp}\"";
                     if (ExecIdle(ff, args) != 0 || !File.Exists(tmp)) return false;
                     File.Move(tmp, job.path, true);
                     return true;
@@ -1758,6 +1792,7 @@ namespace TynoRec
             }).ContinueWith(t => Dispatcher.BeginInvoke(new Action(() =>
             {
                 enhBusy = false;
+                try { if (meta.TryGetValue(Path.GetFileName(job.path), out var em)) { em.EnhC = false; em.EnhD = false; SaveMeta(); } } catch { }
                 if (!t.IsFaulted && t.Result) { Toast("✨ Clip amélioré"); LibRefresh(null, null); }
                 QueueSync();
                 RunEnhance();
@@ -1922,7 +1957,7 @@ namespace TynoRec
                         var t = sb.ToString().Trim();
                         lastGame = GameAlias.TryGetValue(n, out var nice) ? nice : string.IsNullOrEmpty(t) ? n : (t.Length > 40 ? t[..40] : t);
                         try { SaveGameIcon(lastGame, pid); } catch { }
-                        TrackGame(p, lastGame);
+                        TrackGame(p, lastGame); LearnGame(n);
                     }
                 }
             }
@@ -2388,7 +2423,7 @@ namespace TynoRec
                     try
                     {
                         var psi = new ProcessStartInfo(FF, args) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true };
-                        using var p = Process.Start(psi); p.StandardError.ReadToEnd(); p.WaitForExit(); return p.ExitCode;
+                        using var p = Process.Start(psi); try { p.PriorityClass = ProcessPriorityClass.BelowNormal; } catch { } p.StandardError.ReadToEnd(); p.WaitForExit(); return p.ExitCode;
                     }
                     catch { return -1; }
                 }

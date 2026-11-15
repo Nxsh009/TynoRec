@@ -73,13 +73,17 @@ namespace TynoRec
                     if (string.Equals(a.GetProperty("name").GetString(), AssetName, StringComparison.OrdinalIgnoreCase))
                         url = a.GetProperty("browser_download_url").GetString();
                 if (url == null) return;
+                string shaUrl = null;   // empreinte SHA-256 publiée avec la release (vérifiée avant installation)
+                foreach (var a in root.GetProperty("assets").EnumerateArray())
+                    if (string.Equals(a.GetProperty("name").GetString(), AssetName + ".sha256", StringComparison.OrdinalIgnoreCase))
+                        shaUrl = a.GetProperty("browser_download_url").GetString();
 
                 var notes = CleanNotes(root.TryGetProperty("body", out var b) ? b.GetString() : "");
                 var win = new UpdateWindow(Norm(Current), Norm(latest), notes);
                 win.Show();
                 if (!await win.Ask()) { win.Close(); return; }
 
-                try { await InstallAsync(url, win); }
+                try { await InstallAsync(url, shaUrl, win); }
                 catch (Exception ex) { win.Fail("Échec de la mise à jour : " + ex.Message); }
             }
             catch (Exception ex)
@@ -135,6 +139,25 @@ namespace TynoRec
             }
         }
 
+        /// <summary>Télécharge l'empreinte SHA-256 (64 caractères hexadécimaux) ; null si elle n'est pas publiée (404).</summary>
+        static async Task<string> FetchShaAsync(string url)
+        {
+            using var r = await http.GetAsync(url);
+            if (r.StatusCode == System.Net.HttpStatusCode.NotFound) return null;
+            r.EnsureSuccessStatusCode();
+            var m = Regex.Match(await r.Content.ReadAsStringAsync(), "[0-9a-fA-F]{64}");
+            if (!m.Success) throw new Exception("fichier d'empreinte invalide.");
+            return m.Value;
+        }
+
+        static void VerifySha(string file, string expected)
+        {
+            if (expected == null) return;
+            using var fs = File.OpenRead(file);
+            var got = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(fs));
+            if (!got.Equals(expected, StringComparison.OrdinalIgnoreCase)) { fs.Dispose(); try { File.Delete(file); } catch { } throw new Exception("empreinte SHA-256 incorrecte : fichier corrompu ou modifié."); }
+        }
+
         /// <summary>true si ffmpeg est déjà là (à côté de l'app, dans le dossier de données de TynoRec, ou dans le PATH).</summary>
         public static bool HasFFmpeg(string configured, string dataDir)
         {
@@ -158,8 +181,9 @@ namespace TynoRec
             try
             {
                 Directory.CreateDirectory(dir);
-                var zip = Path.Combine(Path.GetTempPath(), "TynoRecFFmpeg.zip");
+                var zip = Path.Combine(Path.GetTempPath(), "TynoRecFFmpeg_" + Guid.NewGuid().ToString("N") + ".zip");
                 await DownloadAsync(FFmpegUrl, zip, win);
+                VerifySha(zip, await FetchShaAsync(FFmpegUrl + ".sha256"));
                 win.SetStatus("Installation…");
                 await Task.Run(() =>
                 {
@@ -179,16 +203,19 @@ namespace TynoRec
             }
         }
 
-        static async Task InstallAsync(string url, UpdateWindow win)
+        static async Task InstallAsync(string url, string shaUrl, UpdateWindow win)
         {
-            var work = Path.Combine(Path.GetTempPath(), "TynoRecUpdate");
-            if (Directory.Exists(work)) Directory.Delete(work, true);
+            // anciens dossiers de mise à jour nettoyés ; dossier de travail à nom aléatoire (imprévisible pour un autre processus)
+            foreach (var old in Directory.GetDirectories(Path.GetTempPath(), "TynoRecUpdate*"))
+                try { Directory.Delete(old, true); } catch { }
+            var work = Path.Combine(Path.GetTempPath(), "TynoRecUpdate_" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(work);
 
             var zip = Path.Combine(work, "update.zip");
             var src = Path.Combine(work, "files");
 
             await DownloadAsync(url, zip, win);
+            if (shaUrl != null) VerifySha(zip, await FetchShaAsync(shaUrl));
 
             win.SetStatus("Installation…");
             await Task.Run(() => ZipFile.ExtractToDirectory(zip, src, true));

@@ -31,10 +31,17 @@ jobs:
           Remove-Item out\*.pdb -ErrorAction SilentlyContinue
           Compress-Archive -Path out\* -DestinationPath TynoRec-update.zip
 
+      - name: Empreinte SHA-256 de la mise à jour
+        shell: pwsh
+        run: |
+          $h = (Get-FileHash TynoRec-update.zip -Algorithm SHA256).Hash.ToLower()
+          "$h  TynoRec-update.zip" | Out-File -Encoding ascii TynoRec-update.zip.sha256
+
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             TynoRec-update.zip
+            TynoRec-update.zip.sha256
             out/TynoRec.exe
           generate_release_notes: true

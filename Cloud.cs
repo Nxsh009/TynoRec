@@ -204,12 +204,12 @@ namespace TynoRec
 
         // ---------- clips ----------
         // Métadonnées (nom, jeu, durée, favori) : table Supabase. Vidéos : Cloudflare R2, via des URL signées par le Worker.
-        static async Task<string> Sign(string op, string name)
+        static async Task<string> Sign(string op, string name, long size = 0)
         {
             Check(); await EnsureFresh();
             using var req = new HttpRequestMessage(HttpMethod.Post, WorkerUrl);
             req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", access);
-            req.Content = new StringContent(JsonSerializer.Serialize(new { op, name }), Encoding.UTF8, "application/json");
+            req.Content = new StringContent(JsonSerializer.Serialize(new { op, name, size }), Encoding.UTF8, "application/json");
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(25));
             HttpResponseMessage r;
             try { r = await http.SendAsync(req, cts.Token); }
@@ -233,8 +233,8 @@ namespace TynoRec
 
         public static async Task UploadClip(string path, string name, string game, double dur, bool fav, CancellationToken ct = default)
         {
-            var url = await Sign("put", name);
             var len = new FileInfo(path).Length;
+            var url = await Sign("put", name, len);
             using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 20, true))
             using (var req = new HttpRequestMessage(HttpMethod.Put, url))
             {
